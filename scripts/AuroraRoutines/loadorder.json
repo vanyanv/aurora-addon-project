@@ -4,6 +4,13 @@
   ],
   "routines": {
     "enabled": true,
-    "loadOrder": []
+    "loadOrder": [
+      "Routines/Rogue/Combat/Spellbook.lua",
+      "Routines/Rogue/Combat/Interface.lua",
+      "Routines/Rogue/Combat/Rotation.lua",
+      "Routines/Rogue/AdaptivePvP/Spellbook.lua",
+      "Routines/Rogue/AdaptivePvP/Interface.lua",
+      "Routines/Rogue/AdaptivePvP/Rotation.lua"
+    ]
   }
 }
