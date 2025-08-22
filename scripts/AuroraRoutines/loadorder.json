@@ -10,7 +10,10 @@
       "Routines/Rogue/Combat/Rotation.lua",
       "Routines/Rogue/AdaptivePvP/Spellbook.lua",
       "Routines/Rogue/AdaptivePvP/Interface.lua",
-      "Routines/Rogue/AdaptivePvP/Rotation.lua"
+      "Routines/Rogue/AdaptivePvP/Rotation.lua",
+      "Routines/Hunter/BeastMastery/Spellbook.lua",
+      "Routines/Hunter/BeastMastery/Interface.lua",
+      "Routines/Hunter/BeastMastery/Rotation.lua"
     ]
   }
 }

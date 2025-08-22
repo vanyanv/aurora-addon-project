@@ -122,6 +122,25 @@ auras.Deadly_Poison = NewSpell(2823)
 auras.Crippling_Poison = NewSpell(3408)
 auras.Mind_numbing_Poison = NewSpell(5761)
 
+-- Enemy auras to track for predictions
+auras.Bear_Form = NewSpell(5487)
+auras.Cat_Form = NewSpell(768)
+auras.Travel_Form = NewSpell(783)
+auras.Aquatic_Form = NewSpell(1066)
+auras.Power_Word_Shield = NewSpell(17)
+auras.Renew = NewSpell(139)
+auras.Fear_Ward = NewSpell(6346)
+auras.Inner_Fire = NewSpell(588)
+auras.Divine_Shield = NewSpell(642)
+auras.Blessing_of_Protection = NewSpell(1022)
+auras.Ice_Block = NewSpell(45438)
+auras.Ice_Barrier = NewSpell(11426)
+auras.Frost_Nova = NewSpell(122)
+auras.Berserker_Rage = NewSpell(18499)
+auras.Retaliation = NewSpell(20230)
+auras.Shield_Wall = NewSpell(871)
+auras.Forbearance = NewSpell(25771)
+
 -- Enemy Abilities Database for Strategic Tracking
 local EnemyAbilities = {
     WARRIOR = {
@@ -247,6 +266,31 @@ local ThreatPatterns = {
         highThreat = { "divineShieldReady", "lowHealth", "casting" },
         mediumThreat = { "inMelee", "hasShield" },
         lowThreat = { "forbearance", "outOfMana", "silenced" }
+    },
+    PRIEST = {
+        highThreat = { "psychicScreamReady", "lowHealth", "casting", "hasShield" },
+        mediumThreat = { "inScreamRange", "hasMana", "fearWardUp" },
+        lowThreat = { "silenced", "outOfMana", "mindControlDown", "interrupted" }
+    },
+    DRUID = {
+        highThreat = { "humanForm", "bearForm", "natureSwiftnessReady", "lowHealth" },
+        mediumThreat = { "catForm", "travelForm", "hasMana" },
+        lowThreat = { "aquaticForm", "outOfMana", "silenced", "rooted" }
+    },
+    WARLOCK = {
+        highThreat = { "fearReady", "deathCoilReady", "hasSoulShards", "lowHealth" },
+        mediumThreat = { "casting", "hasMana", "petAlive" },
+        lowThreat = { "silenced", "outOfMana", "petDead", "interrupted" }
+    },
+    HUNTER = {
+        highThreat = { "petAlive", "aimingShotCasting", "flareReady", "lowHealth" },
+        mediumThreat = { "inRange", "feignDeathReady", "disengage" },
+        lowThreat = { "petDead", "outOfAmmo", "meleeRange", "trapCooldown" }
+    },
+    SHAMAN = {
+        highThreat = { "earthShockReady", "groundingTotemUp", "lowHealth", "casting" },
+        mediumThreat = { "inShockRange", "hasMana", "tremorTotemUp" },
+        lowThreat = { "silenced", "outOfMana", "interrupted", "groundingDown" }
     }
 }
 

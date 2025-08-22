@@ -92,9 +92,29 @@ local function hasSpell(spellTable, spellName)
     return spellTable and spellTable[spellName] and spellTable[spellName]:isknown()
 end
 
+local function canCast(spell, target)
+    if not spell then return false end
+    if not spell:isknown() then return false end
+    if not spell:ready() then return false end
+    if target and (not target.exists or not target.alive) then return false end
+    return true
+end
+
+local function safeCast(spell, target, successMessage)
+    if not canCast(spell, target) then return false end
+    if spell:cast(target) then
+        if successMessage then
+            notify(successMessage)
+        end
+        return true
+    end
+    return false
+end
+
 local function getEnemyClass()
-    if not target.exists then return "UNKNOWN" end
-    return target.class or "UNKNOWN"
+    if not target or not target.exists then return "UNKNOWN" end
+    local success, class = pcall(function() return target.class end)
+    return success and class or "UNKNOWN"
 end
 
 -- Energy Management Functions
@@ -115,6 +135,8 @@ end
 local function shouldPoolEnergy(plannedAction, targetState)
     local currentEnergy = player.energy or 0
     local energyState = assessEnergyState()
+    local config = getConfig()
+    local poolThreshold = config.poolEnergyThreshold or 80
     
     -- Pool before burst windows
     if targetState == CombatStates.BURST and energyState ~= EnergyStates.ABUNDANT then
@@ -122,8 +144,19 @@ local function shouldPoolEnergy(plannedAction, targetState)
     end
     
     -- Pool before important combo sequences
-    if plannedAction == "COLD_BLOOD_COMBO" and currentEnergy < 80 then
+    if plannedAction == "COLD_BLOOD_COMBO" and currentEnergy < poolThreshold then
         return true
+    end
+    
+    -- Pool for energy optimization setting
+    if config.smartEnergyManagement and currentEnergy < poolThreshold then
+        local enemyClass = getEnemyClass()
+        local predictions = predictEnemyActions(enemyClass)
+        
+        -- Pool before predicted opportunities
+        if predictions and predictions.timeWindow <= 3 then
+            return true
+        end
     end
     
     -- Pool before enemy vulnerability windows
@@ -132,22 +165,50 @@ local function shouldPoolEnergy(plannedAction, targetState)
         return true -- Pool before Divine Shield ends
     end
     
+    -- Pool before Druid form shifts (if enabled)
+    if enemyClass == "DRUID" and config.druidFormTracking then
+        local prediction = predictDruidShapeshift()
+        if prediction and prediction.confidence >= 7 and currentEnergy < poolThreshold then
+            return true
+        end
+    end
+    
+    -- Pool before Priest fear if close
+    if enemyClass == "PRIEST" and config.fearPositioning and target.distance < 10 and 
+       isEnemyAbilityReady(8122, target.guid) and currentEnergy < poolThreshold then
+        return true
+    end
+    
+    -- Emergency energy reserve
+    local emergencyReserve = config.emergencyReserve or 60
+    local threat = assessStrategicThreat(enemyClass)
+    if threat == "CRITICAL" and currentEnergy < emergencyReserve then
+        return true
+    end
+    
     return false
 end
 
 -- Druid Form Detection & Tracking
 local function detectDruidForm()
-    if not target.exists then return DruidForms.UNKNOWN end
+    if not target or not target.exists then return DruidForms.UNKNOWN end
     
     local enemyClass = getEnemyClass()
     if enemyClass ~= "DRUID" then return DruidForms.UNKNOWN end
     
+    -- Safely check for form auras
+    local function hasAura(spellId)
+        if not target.aura then return false end
+        local success, result = pcall(target.aura, spellId)
+        return success and result
+    end
+    
     -- Check for form auras
-    if target.aura(768) then -- Cat Form
+    if hasAura(768) then -- Cat Form
         return DruidForms.CAT
-    elseif target.aura(5487) then -- Bear Form
+    elseif hasAura(5487) then -- Bear Form
         return DruidForms.BEAR
-    elseif target.aura(783) then -- Travel Form
+    elseif hasAura(783) then -- Travel Form
         return DruidForms.TRAVEL
     else
         return DruidForms.HUMAN -- Default/caster form
@@ -155,7 +216,10 @@ local function detectDruidForm()
 end
 
 local function updateDruidState()
-    local currentForm = detectDruidForm()
+    local success, currentForm = pcall(detectDruidForm)
+    if not success then
+        currentForm = DruidForms.UNKNOWN
+    end
     
     if currentForm ~= druidState.currentForm then
         -- Form change detected
@@ -163,11 +227,20 @@ local function updateDruidState()
         druidState.currentForm = currentForm
         druidState.lastFormChange = GetTime()
         
+        -- Safely get target health
+        local targetHP = 100
+        if target and target.exists then
+            local hpSuccess, hp = pcall(function() return target.hp end)
+            if hpSuccess and hp then
+                targetHP = hp
+            end
+        end
+        
         -- Add to history
         druidState.formHistory[#druidState.formHistory + 1] = {
             form = currentForm,
             time = GetTime(),
-            health = target.hp
+            health = targetHP
         }
         
         -- Keep only last 10 form changes
@@ -175,7 +248,9 @@ local function updateDruidState()
             table.remove(druidState.formHistory, 1)
         end
         
-        notify("🔄 Druid shifted to " .. currentForm .. " form!")
+        if currentForm ~= DruidForms.UNKNOWN then
+            notify("🔄 Druid shifted to " .. currentForm .. " form!")
+        end
     end
 end
 
@@ -573,20 +648,11 @@ local function executeStealthOpener()
     local config = getConfig()
     
     if opener == "cheap_shot" and spells.Cheap_Shot then
-        if spells.Cheap_Shot:cast(target) then
-            notify("Cheap Shot opener - 4 second stun!")
-            return true
-        end
+        return safeCast(spells.Cheap_Shot, target, "Cheap Shot opener - 4 second stun!")
     elseif opener == "ambush" and spells.Ambush then
-        if spells.Ambush:cast(target) then
-            notify("Ambush opener - high damage!")
-            return true
-        end
+        return safeCast(spells.Ambush, target, "Ambush opener - high damage!")
     elseif opener == "garrote" and spells.Garrote then
-        if spells.Garrote:cast(target) then
-            notify("Garrote opener - DOT + combo point")
-            return true
-        end
+        return safeCast(spells.Garrote, target, "Garrote opener - DOT + combo point")
     end
     
     return false
@@ -603,19 +669,15 @@ local function manageCrowdControl()
         local threat = assessThreat()
         local minCP = (threat == "CRITICAL") and 1 or 3
         
-        if currentCP >= minCP and spells.Kidney_Shot:cast(target) then
-            notify("Kidney Shot - " .. currentCP .. "CP stun!")
-            return true
+        if currentCP >= minCP then
+            return safeCast(spells.Kidney_Shot, target, "Kidney Shot - " .. currentCP .. "CP stun!")
         end
     end
     
     -- Gouge for breathing room
     if player.level >= 6 and hasSpell(spells, "Gouge") and 
        assessThreat() == "CRITICAL" then
-        if spells.Gouge:cast(target) then
-            notify("Gouge - get behind and restealth!")
-            return true
-        end
+        return safeCast(spells.Gouge, target, "Gouge - get behind and restealth!")
     end
     
     return false
@@ -632,19 +694,13 @@ local function executeFinisher()
     if hasSpell(talents, "Cold_Blood") and config.coldBloodCombos ~= false then
         local minCP = config.coldBloodCPThreshold or 5
         if currentCP >= minCP and talents.Cold_Blood:ready() then
-            if talents.Cold_Blood:cast(player) then
-                notify("Cold Blood active - guaranteed crit!")
-                return true
-            end
+            return safeCast(talents.Cold_Blood, player, "Cold Blood active - guaranteed crit!")
         end
     end
     
     -- Emergency finisher on low CP if target is low
     if target.hp <= 25 and currentCP >= 2 then
-        if spells.Eviscerate:cast(target) then
-            notify("Emergency Eviscerate - finish them!")
-            return true
-        end
+        return safeCast(spells.Eviscerate, target, "Emergency Eviscerate - finish them!")
     end
     
     -- Standard finisher thresholds
@@ -655,9 +711,8 @@ local function executeFinisher()
         finisherCP = 4
     end
     
-    if currentCP >= finisherCP and spells.Eviscerate:cast(target) then
-        notify("Eviscerate - " .. currentCP .. " combo points!")
-        return true
+    if currentCP >= finisherCP then
+        return safeCast(spells.Eviscerate, target, "Eviscerate - " .. currentCP .. " combo points!")
     end
     
     return false
@@ -669,24 +724,17 @@ local function buildComboPoints()
     
     -- Riposte priority (if available)
     if hasSpell(talents, "Riposte") and talents.Riposte:ready() then
-        if talents.Riposte:cast(target) then
-            notify("Riposte - reactive strike!")
-            return true
-        end
+        return safeCast(talents.Riposte, target, "Riposte - reactive strike!")
     end
     
     -- Hemorrhage for PvP (if available)
     if hasSpell(talents, "Hemorrhage") and getConfig().useHemorrhage ~= false then
-        if talents.Hemorrhage:cast(target) then
-            return true
-        end
+        return safeCast(talents.Hemorrhage, target)
     end
     
     -- Standard Sinister Strike
     if hasSpell(spells, "SinisterStrike") then
-        if spells.SinisterStrike:cast(target) then
-            return true
-        end
+        return safeCast(spells.SinisterStrike, target)
     end
     
     return false
@@ -800,6 +848,34 @@ local function provideTacticalAdvice()
     end
 end
 
+-- Cooldown Baiting Decision Logic
+local function shouldBaitCooldowns(enemyClass)
+    local config = getConfig()
+    if not config.enableCooldownBaiting then return false end
+    
+    local threat = assessStrategicThreat(enemyClass)
+    local baitStrategy = config.baitingAggressiveness or "Moderate"
+    
+    -- Only bait if we're not in immediate danger
+    if threat == "CRITICAL" then return false end
+    
+    if enemyClass == "MAGE" then
+        -- Bait Ice Block if they're low health and have it ready
+        return target.hp < 40 and isEnemyAbilityReady(45438, target.guid)
+    elseif enemyClass == "PRIEST" then
+        -- Bait Psychic Scream by getting close
+        return target.distance > 8 and isEnemyAbilityReady(8122, target.guid) and baitStrategy ~= "Conservative"
+    elseif enemyClass == "PALADIN" then
+        -- Bait Divine Shield with burst threat
+        return target.hp < 60 and isEnemyAbilityReady(642, target.guid) and baitStrategy == "Aggressive"
+    elseif enemyClass == "WARRIOR" then
+        -- Bait Berserker Rage with CC
+        return isEnemyAbilityReady(18499, target.guid) and hasSpell(spells, "Cheap_Shot") and player.aura(1784)
+    end
+    
+    return false
+end
+
 -- Cooldown Baiting & Manipulation System
 local function executeCooldownBait(enemyClass, targetCooldown)
     local config = getConfig()
@@ -813,7 +889,7 @@ local function executeCooldownBait(enemyClass, targetCooldown)
             execute = function()
                 if hasSpell(spells, "Cheap_Shot") and player.aura(1784) then
                     notify("🧊 Forcing Ice Block with pressure!")
-                    return spells.Cheap_Shot:cast(target)
+                    return safeCast(spells.Cheap_Shot, target)
                 end
             end
         }
@@ -825,7 +901,7 @@ local function executeCooldownBait(enemyClass, targetCooldown)
             execute = function()
                 if hasSpell(spells, "Cheap_Shot") and player.aura(1784) then
                     notify("⚡ Forcing Berserker Rage with stun!")
-                    return spells.Cheap_Shot:cast(target)
+                    return safeCast(spells.Cheap_Shot, target)
                 end
             end
         }
@@ -868,60 +944,74 @@ local function executeStrategicAction(enemyClass, predictions)
     -- Pre-emptive actions based on predictions
     if predictions.action == "INTERCEPT" and predictions.counterStrategy == "PREEMPTIVE_STUN" then
         if hasSpell(spells, "Cheap_Shot") and player.aura(1784) then
-            if spells.Cheap_Shot:cast(target) then
-                notify("🎯 Pre-emptive Cheap Shot before Intercept!")
-                return true
-            end
+            return safeCast(spells.Cheap_Shot, target, "🎯 Pre-emptive Cheap Shot before Intercept!")
         elseif hasSpell(spells, "Kidney_Shot") and player.combopoints >= 1 then
-            if spells.Kidney_Shot:cast(target) then
-                notify("🎯 Pre-emptive Kidney Shot before Intercept!")
-                return true
-            end
+            return safeCast(spells.Kidney_Shot, target, "🎯 Pre-emptive Kidney Shot before Intercept!")
         end
     elseif predictions.action == "FROST_NOVA_BLINK" and predictions.counterStrategy == "INTERRUPT_OR_STUN" then
         if hasSpell(spells, "Kick") and target.casting then
-            if spells.Kick:cast(target) then
-                notify("🚫 Interrupted before Nova+Blink!")
-                return true
-            end
+            return safeCast(spells.Kick, target, "🚫 Interrupted before Nova+Blink!")
         end
     elseif predictions.action == "DIVINE_SHIELD" and predictions.counterStrategy == "FORCE_EARLY_OR_WAIT" then
         local strategy = config.strategyAggressiveness or "Adaptive"
         if strategy == "Aggressive" then
             -- Try to force early bubble with burst
-            if hasSpell(talents, "Cold_Blood") and talents.Cold_Blood:ready() and player.combopoints >= 4 then
-                if talents.Cold_Blood:cast(player) then
-                    notify("🔥 Forcing early Divine Shield with burst!")
-                    return true
-                end
+            if hasSpell(talents, "Cold_Blood") and player.combopoints >= 4 then
+                return safeCast(talents.Cold_Blood, player, "🔥 Forcing early Divine Shield with burst!")
             end
         end
     elseif predictions.action == "BEAR_FORM_SHIFT" and predictions.counterStrategy == "STUN_DURING_SHIFT" then
         if hasSpell(spells, "Cheap_Shot") and player.aura(1784) then
-            if spells.Cheap_Shot:cast(target) then
-                notify("🔄 Stunning during form shift!")
-                return true
-            end
+            return safeCast(spells.Cheap_Shot, target, "🔄 Stunning during form shift!")
+        end
+    elseif predictions.action == "HEAL_FORM_SHIFT" and config.formSpecificStrategies then
+        -- Druid shifting to heal form - interrupt immediately
+        if hasSpell(spells, "Kick") then
+            return safeCast(spells.Kick, target, "🚫 Interrupting form shift to heal!")
+        elseif hasSpell(spells, "Kidney_Shot") and player.combopoints >= 1 then
+            return safeCast(spells.Kidney_Shot, target, "🔄 Stunning during heal form shift!")
         end
     elseif predictions.action == "HEALING_TOUCH" and predictions.counterStrategy == "INTERRUPT_IMMEDIATELY" then
-        if hasSpell(spells, "Kick") then
-            if spells.Kick:cast(target) then
-                notify("🚫 Interrupted Healing Touch!")
-                return true
-            end
+        if hasSpell(spells, "Kick") and config.healingInterruptPriority then
+            return safeCast(spells.Kick, target, "🚫 Interrupted Healing Touch!")
+        end
+    elseif predictions.action == "NATURE_SWIFTNESS_HEAL" and config.formSpecificStrategies then
+        -- High priority - instant heal incoming
+        if hasSpell(spells, "Kidney_Shot") and player.combopoints >= 1 then
+            return safeCast(spells.Kidney_Shot, target, "⚡ Stopping Nature's Swiftness heal!")
         end
     elseif predictions.action == "PSYCHIC_SCREAM" and predictions.counterStrategy == "GET_BEHIND_OR_STUN" then
-        if hasSpell(spells, "Cheap_Shot") and player.aura(1784) then
-            if spells.Cheap_Shot:cast(target) then
-                notify("😱 Prevented Psychic Scream with stun!")
-                return true
-            end
+        if hasSpell(spells, "Cheap_Shot") and player.aura(1784) and config.fearPositioning then
+            return safeCast(spells.Cheap_Shot, target, "😱 Prevented Psychic Scream with stun!")
         end
-    elseif predictions.action == "GREATER_HEAL" and predictions.counterStrategy == "INTERRUPT_IMMEDIATELY" then
+    elseif predictions.action == "MIND_CONTROL" and config.mindControlPredictions then
+        -- Try to break line of sight or stun before MC
+        if hasSpell(spells, "Kidney_Shot") and player.combopoints >= 1 then
+            return safeCast(spells.Kidney_Shot, target, "🧠 Stopping Mind Control!")
+        end
+    elseif predictions.action == "GREATER_HEAL" and config.healInterruptChains then
         if hasSpell(spells, "Kick") then
-            if spells.Kick:cast(target) then
-                notify("🚫 Interrupted Greater Heal!")
-                return true
+            return safeCast(spells.Kick, target, "🚫 Interrupted Greater Heal!")
+        end
+    elseif predictions.action == "FLASH_HEAL" and predictions.counterStrategy == "INTERRUPT_QUICKLY" then
+        if hasSpell(spells, "Kick") and config.healInterruptChains then
+            return safeCast(spells.Kick, target, "🚫 Interrupted Flash Heal!")
+        end
+    end
+    
+    -- Cooldown baiting logic
+    if config.enableCooldownBaiting then
+        local baitStrategy = config.baitingAggressiveness or "Moderate"
+        
+        if enemyClass == "PRIEST" and target.distance < 8 and not isEnemyAbilityReady(8122, target.guid) then
+            -- Psychic Scream is down, apply pressure
+            if baitStrategy == "Aggressive" and hasSpell(spells, "Cheap_Shot") and player.aura(1784) then
+                return safeCast(spells.Cheap_Shot, target, "💀 Pressure while Psychic Scream down!")
+            end
+        elseif enemyClass == "MAGE" and not isEnemyAbilityReady(1953, target.guid) then
+            -- Blink is down, stick close
+            if baitStrategy ~= "Conservative" and hasSpell(spells, "Kidney_Shot") and player.combopoints >= 1 then
+                return safeCast(spells.Kidney_Shot, target, "❄️ Locking down while Blink down!")
             end
         end
     end
@@ -950,6 +1040,8 @@ local function determineOptimalCombatState(situation)
         if not player.aura(1784) then -- No longer in stealth
             if predictions and predictions.confidence > 8 then
                 return CombatStates.BURST
+            elseif predictions and predictions.timeWindow <= 2 then
+                return CombatStates.ADAPT
             else
                 return CombatStates.PRESSURE
             end
@@ -961,6 +1053,8 @@ local function determineOptimalCombatState(situation)
             return CombatStates.BURST
         elseif predictions and predictions.timeWindow < 3 then
             return CombatStates.ADAPT
+        elseif shouldBaitCooldowns(enemyClass) then
+            return CombatStates.BAIT
         end
     elseif currentState == CombatStates.BURST then
         if energyState == EnergyStates.STARVED then
@@ -978,17 +1072,33 @@ local function determineOptimalCombatState(situation)
         end
     elseif currentState == CombatStates.SUSTAIN then
         if energyState == EnergyStates.READY or energyState == EnergyStates.ABUNDANT then
-            if predictions then
+            if predictions and predictions.timeWindow <= 3 then
                 return CombatStates.ADAPT
+            elseif shouldBaitCooldowns(enemyClass) then
+                return CombatStates.BAIT
             else
                 return CombatStates.PRESSURE
             end
         end
     elseif currentState == CombatStates.ADAPT then
         if predictions and predictions.timeWindow > 3 then
-            return CombatStates.PRESSURE
-        elseif energyState == EnergyStates.ABUNDANT then
+            if shouldBaitCooldowns(enemyClass) then
+                return CombatStates.BAIT
+            else
+                return CombatStates.PRESSURE
+            end
+        elseif energyState == EnergyStates.ABUNDANT and not predictions then
             return CombatStates.BURST
+        elseif energyState == EnergyStates.STARVED then
+            return CombatStates.SUSTAIN
+        end
+    elseif currentState == CombatStates.BAIT then
+        if threat == "CRITICAL" then
+            return CombatStates.ESCAPE
+        elseif not shouldBaitCooldowns(enemyClass) then
+            return CombatStates.PRESSURE
+        elseif energyState == EnergyStates.STARVED then
+            return CombatStates.SUSTAIN
         end
     elseif currentState == CombatStates.ESCAPE then
         if threat ~= "CRITICAL" then
@@ -1036,7 +1146,10 @@ local function executeStateAction(state, situation)
         
     elseif state == CombatStates.SUSTAIN then
         -- Energy pooling - don't execute abilities, just wait
-        notify("⚡ Pooling energy for next opportunity...")
+        local config = getConfig()
+        if config.stateNotifications then
+            notify("⚡ Pooling energy for next opportunity...")
+        end
         return false
         
     elseif state == CombatStates.ADAPT then
@@ -1044,6 +1157,15 @@ local function executeStateAction(state, situation)
         if config.enablePredictions and executeStrategicAction(enemyClass, predictions) then
             return true
         end
+        
+    elseif state == CombatStates.BAIT then
+        -- Execute cooldown baiting strategy
+        local baitResult = executeCooldownBait(enemyClass, "STRATEGIC")
+        if baitResult and baitResult.execute then
+            return baitResult.execute()
+        end
+        -- Default baiting behavior - apply moderate pressure
+        return buildComboPoints()
         
     elseif state == CombatStates.ESCAPE then
         -- Emergency escape logic (handled by player manually)
@@ -1066,51 +1188,128 @@ local function updateCombatState(newState, actionResult)
         -- Update energy state
         combatState.energyState = assessEnergyState()
         
-        notify("🔄 Combat State: " .. newState)
+        local config = getConfig()
+        
+        -- State change notifications
+        if config.stateNotifications then
+            local stateMessages = {
+                [CombatStates.ANALYZE] = "🔍 ANALYZING situation...",
+                [CombatStates.OPENER] = "⚔️ OPENER phase - engaging!",
+                [CombatStates.PRESSURE] = "💪 PRESSURE phase - building advantage",
+                [CombatStates.BURST] = "🔥 BURST phase - maximum damage!",
+                [CombatStates.CONTROL] = "🛡️ CONTROL phase - crowd control",
+                [CombatStates.BAIT] = "🎣 BAIT phase - forcing cooldowns",
+                [CombatStates.SUSTAIN] = "⚡ SUSTAIN phase - energy recovery",
+                [CombatStates.ADAPT] = "🎯 ADAPT phase - reactive strategy",
+                [CombatStates.ESCAPE] = "🚨 ESCAPE phase - emergency!"
+            }
+            
+            local message = stateMessages[newState] or ("🔄 Combat State: " .. newState)
+            notify(message)
+        else
+            -- Minimal notification for critical states
+            if newState == CombatStates.ESCAPE then
+                notify("🚨 ESCAPE STATE - Use defensive abilities!")
+            elseif newState == CombatStates.BURST then
+                notify("🔥 BURST WINDOW!")
+            end
+        end
     end
 end
 
 -- Unified Cohesive Rotation Controller
 local function executeCohesiveRotation()
-    if not target.exists or not target.enemy or not target.alive then
+    -- Comprehensive safety checks
+    if not target or not target.exists then
         combatState.current = CombatStates.ANALYZE
         return false
     end
     
-    -- 1. Analyze complete situation
-    local situation = {
-        energyState = assessEnergyState(),
-        threat = assessStrategicThreat(getEnemyClass()),
-        enemyClass = getEnemyClass(),
-        predictions = predictEnemyActions(getEnemyClass()),
-        currentCP = player.combopoints or 0,
-        playerHP = player.hp or 100,
-        targetHP = target.hp or 100,
-        distance = target.distance or 100
-    }
+    local targetAlive = true
+    local targetEnemy = true
     
-    -- Update Druid state if fighting druid
-    if situation.enemyClass == "DRUID" then
-        updateDruidState()
-    end
+    -- Safe target state checks
+    local success, alive = pcall(function() return target.alive end)
+    if success then targetAlive = alive else targetAlive = false end
     
-    -- 2. Determine optimal combat state
-    local optimalState = determineOptimalCombatState(situation)
+    local success2, enemy = pcall(function() return target.enemy end)
+    if success2 then targetEnemy = enemy else targetEnemy = false end
     
-    -- 3. Check if we should pool energy before action
-    if shouldPoolEnergy(combatState.plannedActions[1], optimalState) then
-        notify("⚡ Pooling energy for optimal action...")
+    if not targetAlive or not targetEnemy then
+        combatState.current = CombatStates.ANALYZE
         return false
     end
     
-    -- 4. Execute state-specific logic
-    local actionTaken = executeStateAction(optimalState, situation)
+    -- 1. Analyze complete situation with safe value extraction
+    local enemyClass = getEnemyClass()
+    local situation = {
+        energyState = assessEnergyState(),
+        threat = "NEUTRAL",
+        enemyClass = enemyClass,
+        predictions = nil,
+        currentCP = 0,
+        playerHP = 100,
+        targetHP = 100,
+        distance = 100
+    }
+    
+    -- Safe value extraction with error handling
+    local function safeGet(obj, prop, default)
+        local success, value = pcall(function() return obj[prop] end)
+        return success and value or default
+    end
+    
+    situation.currentCP = safeGet(player, "combopoints", 0)
+    situation.playerHP = safeGet(player, "hp", 100)
+    situation.targetHP = safeGet(target, "hp", 100) 
+    situation.distance = safeGet(target, "distance", 100)
+    
+    -- Safe threat assessment and predictions
+    local threatSuccess, threat = pcall(assessStrategicThreat, enemyClass)
+    if threatSuccess then situation.threat = threat end
+    
+    local predSuccess, predictions = pcall(predictEnemyActions, enemyClass)
+    if predSuccess then situation.predictions = predictions end
+    
+    -- Update Druid state if fighting druid (with error handling)
+    if situation.enemyClass == "DRUID" then
+        local druidSuccess, druidError = pcall(updateDruidState)
+        if not druidSuccess then
+            -- Reset druid state on error
+            druidState.currentForm = DruidForms.UNKNOWN
+        end
+    end
+    
+    -- 2. Determine optimal combat state (with error handling)
+    local optimalState = combatState.current
+    local stateSuccess, newState = pcall(determineOptimalCombatState, situation)
+    if stateSuccess and newState then
+        optimalState = newState
+    end
+    
+    -- 3. Check if we should pool energy before action
+    local poolSuccess, shouldPool = pcall(shouldPoolEnergy, combatState.plannedActions and combatState.plannedActions[1], optimalState)
+    if poolSuccess and shouldPool then
+        local config = getConfig()
+        if config.stateNotifications then
+            notify("⚡ Pooling energy for optimal action...")
+        end
+        return false
+    end
+    
+    -- 4. Execute state-specific logic (with error handling)
+    local actionTaken = false
+    local actionSuccess, result = pcall(executeStateAction, optimalState, situation)
+    if actionSuccess then
+        actionTaken = result
+    end
     
     -- 5. Update combat state
     updateCombatState(optimalState, actionTaken)
     
-    -- 6. Provide tactical advice
-    provideTacticalAdvice()
+    -- 6. Provide tactical advice (with error handling)
+    local adviceSuccess = pcall(provideTacticalAdvice)
+    -- Continue even if advice fails
     
     return actionTaken
 end
