@@ -1,0 +1,9 @@
+{
+  "files": [
+    "Main.lua"
+  ],
+  "routines": {
+    "enabled": true,
+    "loadOrder": []
+  }
+}

@@ -1,0 +1,19 @@
+# Documentation and development files
+docs/
+CLAUDE.md
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
